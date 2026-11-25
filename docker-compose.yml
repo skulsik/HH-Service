@@ -1,0 +1,164 @@
+services:
+
+    # Laravel application
+    app:
+        build:
+            context: .
+            dockerfile: docker/php/Dockerfile
+        container_name: hh-service-app
+        restart: unless-stopped
+        working_dir: /var/www/html
+        volumes:
+            - ./:/var/www/html
+            - vendor:/var/www/html/vendor
+        ports:
+            - "127.0.0.1:18000:8000"
+        environment:
+            DB_CONNECTION: pgsql
+            DB_HOST: postgres
+            DB_PORT: 5432
+            DB_DATABASE: hh_service
+            DB_USERNAME: hh_service
+            DB_PASSWORD: secret
+            REDIS_HOST: redis
+            REDIS_PORT: 6379
+        command: >
+            sh -c "
+              composer install --no-interaction &&
+              exec php artisan serve --host=0.0.0.0 --port=8000
+            "
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_started
+        networks:
+            - hh-network
+
+    # Vite development server
+    vite:
+        build:
+            context: .
+            dockerfile: docker/php/Dockerfile
+        container_name: hh-service-vite
+        restart: unless-stopped
+        working_dir: /var/www/html
+        volumes:
+            - ./:/var/www/html
+            - node_modules:/var/www/html/node_modules
+        ports:
+            - "127.0.0.1:18017:5173"
+        command: >
+            sh -c "
+              npm install --include=dev &&
+              exec npm run dev -- --host 0.0.0.0 --port 5173 --strictPort
+            "
+        networks:
+            - hh-network
+
+    # Laravel queue worker
+    worker:
+        build:
+            context: .
+            dockerfile: docker/php/Dockerfile
+        container_name: hh-service-worker
+        restart: unless-stopped
+        working_dir: /var/www/html
+        volumes:
+            - ./:/var/www/html
+            - vendor:/var/www/html/vendor
+        command: >
+            sh -c "
+              for i in $$(seq 1 120); do
+                if [ -f vendor/autoload.php ]; then
+                  exec php artisan queue:work redis
+                fi
+                sleep 1
+              done
+              echo 'Composer dependencies were not installed'
+              exit 1
+            "
+        depends_on:
+            - app
+        networks:
+            - hh-network
+
+    # Laravel Scheduler
+    scheduler:
+        build:
+            context: .
+            dockerfile: docker/php/Dockerfile
+        container_name: hh-service-scheduler
+        restart: unless-stopped
+        working_dir: /var/www/html
+        volumes:
+            - ./:/var/www/html
+            - vendor:/var/www/html/vendor
+        command: >
+            sh -c "
+              while true; do
+                php artisan schedule:run --no-interaction
+                sleep 60
+              done
+            "
+        depends_on:
+            - app
+        networks:
+            - hh-network
+
+    # PostgreSQL
+    postgres:
+        image: postgres:17
+        container_name: hh-service-postgres
+        restart: unless-stopped
+        environment:
+            POSTGRES_DB: hh_service
+            POSTGRES_USER: hh_service
+            POSTGRES_PASSWORD: secret
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U hh_service -d hh_service"]
+            interval: 5s
+            timeout: 5s
+            retries: 10
+        networks:
+            - hh-network
+
+    # Redis
+    redis:
+        image: redis:7-alpine
+        container_name: hh-service-redis
+        restart: unless-stopped
+        volumes:
+            - redis_data:/data
+        networks:
+            - hh-network
+
+    # pgAdmin
+    pgadmin:
+        image: dpage/pgadmin4:latest
+        container_name: hh-service-pgadmin
+        restart: unless-stopped
+        environment:
+            PGADMIN_DEFAULT_EMAIL: admin@example.com
+            PGADMIN_DEFAULT_PASSWORD: secret
+        ports:
+            - "127.0.0.1:18050:80"
+        volumes:
+            - pgadmin_data:/var/lib/pgadmin
+        depends_on:
+            - postgres
+        networks:
+            - hh-network
+
+volumes:
+    postgres_data:
+    redis_data:
+    pgadmin_data:
+    vendor:
+    node_modules:
+
+networks:
+    hh-network:
+        driver: bridge
